@@ -30,7 +30,7 @@ public class MF_GMF extends TopKRecommender {
     	/** Model priors to set. */
 	int factors = 10; 	// number of latent factors.
 	int maxIter = 100; 	// maximum iterations.
-	double w0 = 1;	
+	double gamma = 1;	
 	double reg = 0.01; 	// regularization parameters
         double lr = 0.01;       //learning rate
         double init_mean = 0;  // Gaussian mean for init V
@@ -38,8 +38,8 @@ public class MF_GMF extends TopKRecommender {
                
 	
         /** Model parameters to learn */
-        public DenseMatrix U, oldU;	// latent vectors for users
-        public DenseMatrix V, oldV;	// latent vectors for items 
+        public DenseMatrix U;	// latent vectors for users
+        public DenseMatrix V;	// latent vectors for items 
         
         // Caches
         DenseMatrix SU;
@@ -57,25 +57,26 @@ public class MF_GMF extends TopKRecommender {
         public double[] ndcg_vec = new double[maxIter];
 	public double[] precs_vec = new double[maxIter];
         
-        // weight for each positive instance in trainMatrix
+        // Weight for each positive instance in trainMatrix
         SparseMatrix W;
         
-        // penalty for missing preferences on item i.
-        double[] Wi;
-        // indicate new users.
+        // Penalty for missing preferences.
+        double[] eta;
+
+        // Indicate new users.
         double[] Au;
 
-  // weight of new instance in online learning
+  // Weight of new instance in online learning
   public double w_new = 1;
         double eloss = 0;
   
 	public MF_GMF(SparseMatrix trainMatrix, ArrayList<Rating> testRatings, 
-			int topK, int threadNum, int factors, int maxIter, double w0, double reg, double lr,
+			int topK, int threadNum, int factors, int maxIter, double gamma, double reg, double lr,
 			double init_mean, double init_stdev, boolean showProgress, boolean showLoss) {
 		super(trainMatrix, testRatings, topK, threadNum);
 		this.factors = factors;
 		this.maxIter = maxIter;
-		this.w0 = w0;
+		this.gamma = gamma;
 		this.reg = reg;
                 this.lr =lr;
 		this.init_mean = init_mean;
@@ -85,13 +86,14 @@ public class MF_GMF extends TopKRecommender {
 
 
       
-		// assign uniform weight to items
-		Wi = new double[itemCount];
+		// discriminate selected new items
+		eta = new double[itemCount];
 		for (int i = 0; i < itemCount; i ++){
                    if (trainMatrix.getColRef(i).itemCount()== 0)
-                       Wi[i] = 0;
+                       eta[i] = 0;
                    else
-                       Wi[i] = w0/itemCount;
+                       // assign uniform weight to items
+                       eta[i] = gamma/itemCount;
                 }
 			
                 
@@ -145,13 +147,13 @@ public class MF_GMF extends TopKRecommender {
 				SU.set(k, f, val);
 			}
 		}
-		// Init SV as V^T Wi V
+		// Init SV as V^T eta V
 		SV = new DenseMatrix(factors, factors);
 		for (int f = 0; f < factors; f ++) {
 			for (int k = 0; k <= f; k ++) {
 				double val = 0;
 				for (int i = 0; i < itemCount; i ++) 
-					val += V.get(i, f) * V.get(i, k) * Wi[i];
+					val += V.get(i, f) * V.get(i, k) * eta[i];
 				SV.set(f, k, val);
 				SV.set(k, f, val);
 			}
@@ -159,8 +161,8 @@ public class MF_GMF extends TopKRecommender {
 	}
         
         public void buildModel() throws IOException{
-		     System.out.printf("Run for GMF: showProgress=%s, factors=%d, maxIter=%d, reg=%f, w0=%.2f, lr = %.3f",
-				showProgress, factors, maxIter, reg, w0, lr);
+		     System.out.printf("Run for GMF: showProgress=%s, factors=%d, maxIter=%d, reg=%f, gamma=%.2f, lr = %.3f",
+				showProgress, factors, maxIter, reg, gamma, lr);
 		System.out.println("====================================================");
                 PrintWriter writer = new PrintWriter (new FileOutputStream("MF_GMF.progress"));
 		double[] res = new double[3];
@@ -230,7 +232,7 @@ public class MF_GMF extends TopKRecommender {
 			for (int i : trainMatrix.getRowRef(u).indexList()) {
 			    double cta = predict(u,i);                                           
                             l += W.getValue(u, i) *(Math.log(1+ Math.exp(cta)) - trainMatrix.getValue(u, i) * cta);                        
-                            l -= 1/2* Wi[i] * Math.pow(cta, 2) ;  
+                            l -= 1/2* eta[i] * Math.pow(cta, 2) ;  
 			}
                         l += 1/2 * SV.mult(U.row(u, false)).inner(U.row(u, false));
 			L += l;                    
@@ -263,7 +265,7 @@ public class MF_GMF extends TopKRecommender {
 			for (int i : itemList) {
                             double tt = 0;
                             tt += w_items[i]* (drvA(prediction_items[i])- rating_items[i]);
-                            tt -= Wi[i]* prediction_items[i];
+                            tt -= eta[i]* prediction_items[i];
                             pos += tt * V.get(i,f);
                         }
                         grad = neg + pos + reg * U.get(u,f);
@@ -311,7 +313,7 @@ public class MF_GMF extends TopKRecommender {
 			// O(K) complexity for the negative part
 			for (int k = 0; k < factors; k ++) {
 				
-					neg += Wi[i] * V.get(i, k) * SU.get(f, k);
+					neg += eta[i] * V.get(i, k) * SU.get(f, k);
 			}
 			
 			
@@ -319,7 +321,7 @@ public class MF_GMF extends TopKRecommender {
 			for (int u : userList) {
                             double tt = 0;
                             tt += w_users[u]* (drvA(prediction_users[u])- rating_users[u]);
-                            tt -= Wi[i]* prediction_users[u];
+                            tt -= eta[i]* prediction_users[u];
                             pos += tt * U.get(u,f);
                         }
                         grad = neg + pos + reg * V.get(i,f);
@@ -333,8 +335,8 @@ public class MF_GMF extends TopKRecommender {
                     // Update the SV cache
 		    for (int f = 0; f < factors; f ++) {
 			for (int k = 0; k <= f; k ++) {
-				double val = SV.get(f, k) - oldVector.get(f) * oldVector.get(k)* Wi[i]
-						+ V.get(i, f) * V.get(i, k) * Wi[i];
+				double val = SV.get(f, k) - oldVector.get(f) * oldVector.get(k)* eta[i]
+						+ V.get(i, f) * V.get(i, k) * eta[i];
 				SV.set(f, k, val);
 				SV.set(k, f, val);
 			}
@@ -355,12 +357,12 @@ public class MF_GMF extends TopKRecommender {
 		trainMatrix.setValue(u, i, 1);
 		W.setValue(u, i, w_new);
                 
-		if (Wi[i] == 0) { // a new item
-			Wi[i] = w0 / itemCount;
+		if (eta[i] == 0) { // a new item
+			eta[i] = gamma / itemCount;
 			// Update the SV cache
 			for (int f = 0; f < factors; f ++) {
 				for (int k = 0; k <= f; k ++) {
-					double val = SV.get(f, k) + V.get(i, f) * V.get(i, k) * Wi[i];
+					double val = SV.get(f, k) + V.get(i, f) * V.get(i, k) * eta[i];
 					SV.set(f, k, val);
 					SV.set(k, f, val);
 				}
